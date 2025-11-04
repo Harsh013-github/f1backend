@@ -12,4 +12,4 @@ app.get('/api/hello', (req, res) => {
 
 // Start the server
 const PORT = 5000;
-app.listen(PORT, () => console.log("Server running on http://localhost:${PORT}"));
+app.listen(PORT, () => console.log("Server running on http://35.172.222.26:${PORT}"));

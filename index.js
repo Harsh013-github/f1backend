@@ -410,7 +410,7 @@ const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
     info: { title: 'F1 Cars API', version: '1.0.0', description: 'API documentation for F1 Cars backend (Node + Supabase)' },
-    servers: [{ url: `http://localhost:${PORT}${API}` }],
+    servers: [{ url: `http://35.172.222.26:${API}` }],
     components: {
       securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' } }
     },
@@ -435,7 +435,7 @@ app.use((err, _req, res, _next) => {
 // ─────────────────────────────────────────────
 // Start server
 // ─────────────────────────────────────────────
-app.listen(PORT, () => console.log(`✅ F1 API running on http://localhost:${PORT}${API}`))
+app.listen(PORT, () => console.log(`✅ F1 API running on http://35.172.222.26:${API}`))
 
 
 //Right now your code only inserts into public.profiles during signup if a session exists (i.e., email confirmation is OFF). If email confirmation is ON, there’s no session, so your code skips the insert—hence you see users in auth.users but not in public.profiles.
