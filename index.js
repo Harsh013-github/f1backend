@@ -2,69 +2,140 @@
 require('dotenv').config();
 
 const express = require('express');
-const cors = require('cors');
-const Joi = require('joi');
 const jwt = require('jsonwebtoken');
+const Joi = require('joi');
 const { createClient } = require('@supabase/supabase-js');
 const swaggerUi = require('swagger-ui-express');
-const swaggerJsdoc = require('swagger-jsdoc');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const API = '/api';
+app.set('trust proxy', true);
+
+// ─────────────────────────────────────────────
+// Config
+// ─────────────────────────────────────────────
+const PORT = Number(process.env.PORT || 3000);
+const API = normalizeBase(process.env.API || '/api');
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const SERVER_PUBLIC_URL = (process.env.SERVER_PUBLIC_URL || '').replace(/\/+$/, '');
 const JWT_SECRET = process.env.JWT_SECRET || 'changeme';
 
-// ─────────────────────────────────────────────
-// Supabase setup
-// ─────────────────────────────────────────────
+// Supabase
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const ANON_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_ANON_KEY;
 
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error(' Missing SUPABASE_URL or SUPABASE_(SERVICE_ROLE_)KEY. Check your .env');
+if (!SUPABASE_URL || !SERVICE_ROLE) {
+  console.error('❌ Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
   process.exit(1);
 }
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const db = createClient(SUPABASE_URL, SERVICE_ROLE);
+const dbAnon = ANON_KEY ? createClient(SUPABASE_URL, ANON_KEY) : null;
+
+// Log database connection and tables
+async function logDatabaseInfo() {
+  try {
+    console.log('📊 Database Connection Info:');
+    console.log('URL:', SUPABASE_URL);
+    
+    // List all tables
+    const { count: carCount, error: tablesError } = await db
+      .from('f1_cars')
+      .select('*', { count: 'exact', head: true });
+    
+    if (tablesError) {
+      console.error('❌ Error accessing f1_cars table:', tablesError.message);
+    } else {
+      console.log('✅ Connected to f1_cars table');
+      console.log('Total records:', carCount);
+    }
+
+    // Check auth tables
+    const { count: userCount, error: usersError } = await db
+      .from('auth.users')
+      .select('*', { count: 'exact', head: true });
+    
+    if (usersError) {
+      console.error('❌ Error accessing auth.users table:', usersError.message);
+    } else {
+      console.log('✅ Connected to auth.users table');
+      console.log('Total users:', userCount);
+    }
+  } catch (err) {
+    console.error('❌ Database connection error:', err.message);
+  }
+}
+
+// Call the function when server starts
+logDatabaseInfo();
 
 // ─────────────────────────────────────────────
 // Middleware
 // ─────────────────────────────────────────────
-app.use(cors({ origin: true, credentials: true }));
-app.use(express.json());
-app.use((req, _res, next) => { console.log(`${req.method} ${req.url}`); next(); });
+app.use(express.json({ limit: '1mb' }));
+
+// CORS (allow all origins)
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  } else {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+app.use((req, _res, next) => {
+  console.log(`${req.method} ${req.url}`);
+  next();
+});
 
 // ─────────────────────────────────────────────
-/* Helpers */
+// Helpers
 // ─────────────────────────────────────────────
-function sendSuccess(res, data = null, message = 'OK', status = 200) {
-  return res.status(status).json({ success: true, message, data });
+function normalizeBase(s) {
+  if (!s.startsWith('/')) s = '/' + s;
+  if (s.length > 1) s = s.replace(/\/+$/, '');
+  return s;
 }
-function sendError(res, status, code, message, details = undefined) {
-  return res.status(status).json({ success: false, error: { code, message, details } });
-}
-const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// ─────────────────────────────────────────────
-// Auth middleware
-// ─────────────────────────────────────────────
-function authenticateToken(req, res, next) {
+const ok = (res, data = null, message = 'OK', status = 200) =>
+  res.status(status).json({ success: true, message, data });
+const bad = (res, status, code, message, details) =>
+  res.status(status).json({ success: false, error: { code, message, details } });
+const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+function auth(req, res, next) {
   const token = (req.headers.authorization || '').split(' ')[1];
-  if (!token) return sendError(res, 401, 'UNAUTHORIZED', 'Authentication required');
+  if (!token) return bad(res, 401, 'UNAUTHORIZED', 'Authentication required');
   try {
     req.user = jwt.verify(token, JWT_SECRET);
     next();
-  } catch (err) {
-    return sendError(res, 403, 'INVALID_TOKEN', 'Invalid or expired token', err?.message);
+  } catch (e) {
+    return bad(res, 403, 'INVALID_TOKEN', 'Invalid or expired token', e?.message);
   }
 }
 
 // ─────────────────────────────────────────────
-// Validation Schemas
+// Validation
 // ─────────────────────────────────────────────
+const carSchema = Joi.object({
+  name: Joi.string().required(),
+  manufacturer: Joi.string().required(),
+  top_speed: Joi.number().min(0).required(),
+  horsepower: Joi.number().min(0).required(),
+  driver: Joi.string().allow(null, ''),
+  year: Joi.number().integer().min(1950).max(new Date().getFullYear()).required(),
+  image_url: Joi.string().uri().allow('', null),
+});
+
 const signupSchema = Joi.object({
   email: Joi.string().email().required(),
-  password: Joi.string().min(8).max(100).pattern(/[A-Z]/).pattern(/[a-z]/).pattern(/[0-9]/).required(),
+  password: Joi.string().min(8).max(100).required(),
   name: Joi.string().min(2).max(100).required(),
 });
 const loginSchema = Joi.object({
@@ -73,376 +144,210 @@ const loginSchema = Joi.object({
 });
 
 // ─────────────────────────────────────────────
-// Routes
+// Swagger Setup
 // ─────────────────────────────────────────────
-app.get(`${API}/`, (_req, res) => {
-  res.json({
-    success: true,
-    message: 'Welcome to the F1 Cars API',
-    endpoints: [
-      '/api/auth/signup',
-      '/api/auth/login',
-      '/api/me',
-      '/api/cars',
-      '/api/cars/:id',
-      '/api/docs'
-    ]
-  });
-});
+const swaggerServers = [{ url: API, description: 'Relative base (same origin)' }];
+if (SERVER_PUBLIC_URL)
+  swaggerServers.push({ url: `${SERVER_PUBLIC_URL}${API}`, description: 'Absolute (env)' });
 
-// ─────────────────────────────────────────────
-// Signup
-// ─────────────────────────────────────────────
-/**
- * @swagger
- * tags:
- *   - name: Auth
- *     description: Authentication
- *   - name: Cars
- *     description: F1 Cars CRUD
- *
- * components:
- *   securitySchemes:
- *     bearerAuth:
- *       type: http
- *       scheme: bearer
- *       bearerFormat: JWT
- *   schemas:
- *     SignupBody:
- *       type: object
- *       required: [email, password, name]
- *       properties:
- *         email: { type: string, format: email, example: "harshkokitkar2003@gmail.com" }
- *         password: { type: string, example: "Harsh#013" }
- *         name: { type: string, example: "Harsh" }
- *     LoginBody:
- *       type: object
- *       required: [email, password]
- *       properties:
- *         email: { type: string, format: email, example: "harshkokitkar2003@gmail.com" }
- *         password: { type: string, example: "Harsh#013" }
- *     Car:
- *       type: object
- *       properties:
- *         car_id: { type: string, example: "RB20" }
- *         car_name: { type: string, example: "Red Bull RB20" }
- *         constructor: { type: string, example: "Red Bull Racing" }
- *         season: { type: string, example: "2025" }
- *         driver: { type: string, example: "Max Verstappen" }
- *         car_number: { type: integer, example: 1 }
- *         chassis_code: { type: string, example: "RB20" }
- *         engine_supplier: { type: string, example: "Honda" }
- *         engine_type: { type: string, example: "1.6L V6 Turbo Hybrid" }
- *         rpm_limit: { type: integer, example: 15000 }
- *         tyre_supplier: { type: string, example: "Pirelli" }
- *         chassis_material: { type: string, example: "Carbon fiber composite monocoque" }
- *         front_wing: { type: string, example: "Multi-element adjustable" }
- *         rear_wing: { type: string, example: "DRS-enabled" }
- *         floor_design: { type: string, example: "Ground-effect tunnels" }
- *         diffuser: { type: string, example: "Rear aerodynamic diffuser" }
- *         sidepods: { type: string, example: "Aero-optimized cooling" }
- *         halo: { type: string, example: "Titanium protection structure" }
- *         length_m: { type: number, example: 5.0 }
- *         width_m: { type: number, example: 2.0 }
- *         height_m: { type: number, example: 0.95 }
- *         wheelbase_m: { type: number, example: 3.6 }
- *         minimum_weight_kg: { type: number, example: 798 }
- *         acceleration_0_100_kmh: { type: number, example: 2.5 }
- *         top_speed_kmh: { type: number, example: 350 }
- *         downforce_kgf: { type: number, example: 3000 }
- *         cornering_g_force: { type: number, example: 6 }
- *         fuel_capacity_kg: { type: number, example: 110 }
- */
-
-/**
- * @swagger
- * /auth/signup:
- *   post:
- *     summary: Register a new user (Supabase Auth)
- *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/SignupBody'
- *     responses:
- *       200:
- *         description: User registered (may require email verification)
- *       400:
- *         description: Validation or signup error
- */
-app.post(`${API}/auth/signup`, asyncHandler(async (req, res) => {
-  const { email, password, name } = req.body;
-
-  // Use ANON key for the user client
-  const anonClient = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-
-  const { data, error: signErr } = await anonClient.auth.signUp({ email, password });
-  if (signErr) return sendError(res, 400, 'SIGNUP_FAILED', signErr.message);
-
-  // If email confirmation is ON, there is no session here → cannot insert as user.
-  if (!data.session) {
-    return sendSuccess(
-      res,
-      { id: data.user.id, email },
-      'User registered. Please verify your email, then login (profile will be created on first login).'
-    );
-  }
-
-  // Insert profile as the user (RLS: id must equal auth.uid())
-  const userToken = data.session.access_token;
-  const userScoped = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
-    global: { headers: { Authorization: `Bearer ${userToken}` } }
-  });
-
-  const { error: profErr } = await userScoped
-    .from('profiles')
-    .insert([{ id: data.user.id, full_name: name, role: 'USER' }]);
-
-  if (profErr) return sendError(res, 500, 'PROFILE_CREATE_FAILED', profErr.message);
-
-  return sendSuccess(res, { id: data.user.id, email }, 'User registered');
-}));
-
-// ─────────────────────────────────────────────
-// Login
-// ─────────────────────────────────────────────
-/**
- * @swagger
- * /auth/login:
- *   post:
- *     summary: Login and receive API JWT (not Supabase session token)
- *     tags: [Auth]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/LoginBody'
- *     responses:
- *       200:
- *         description: Login successful
- *       401:
- *         description: Invalid credentials or email not confirmed
- */
-app.post(`${API}/auth/login`, asyncHandler(async (req, res) => {
-  const { error } = loginSchema.validate(req.body);
-  if (error) return sendError(res, 400, 'VALIDATION_ERROR', error.details[0].message);
-
-  const { email, password } = req.body;
-  const { data, error: authErr } = await supabase.auth.signInWithPassword({ email, password });
-
-  if (authErr || !data?.user) {
-    const msg = (authErr?.message || '').toLowerCase();
-    if (msg.includes('confirm')) {
-      return sendError(res, 401, 'EMAIL_NOT_CONFIRMED', 'Please verify your email before logging in');
-    }
-    return sendError(res, 401, 'INVALID_CREDENTIALS', 'Invalid email or password');
-  }
-
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('full_name, phone, role')
-    .eq('id', data.user.id)
-    .single();
-
-  const token = jwt.sign(
-    { id: data.user.id, email: data.user.email, role: profile?.role || 'USER' },
-    JWT_SECRET,
-    { expiresIn: '1h' }
-  );
-
-  return sendSuccess(res, {
-    token,
-    user: {
-      id: data.user.id,
-      email: data.user.email,
-      name: profile?.full_name || null,
-      phone: profile?.phone || null,
-      role: profile?.role || 'USER'
-    }
-  }, 'Login successful');
-}));
-
-// ─────────────────────────────────────────────
-// Current user (GET /me)
-// ─────────────────────────────────────────────
-/**
- * @swagger
- * /me:
- *   get:
- *     summary: Get current user's profile
- *     tags: [Auth]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: Current user profile
- *       401:
- *         description: Unauthorized
- */
-app.get(`${API}/me`, authenticateToken, asyncHandler(async (req, res) => {
-  const { data: profile, error } = await supabase
-    .from('profiles')
-    .select('full_name, phone, role, created_at, updated_at')
-    .eq('id', req.user.id)
-    .single();
-  if (error) return sendError(res, 500, 'DB_ERROR', error.message);
-  return sendSuccess(res, { id: req.user.id, email: req.user.email, ...profile }, 'Me fetched');
-}));
-
-// ─────────────────────────────────────────────
-// F1 Cars Routes (CRUD) — ANY AUTHENTICATED USER
-// ─────────────────────────────────────────────
-
-/**
- * @swagger
- * /cars:
- *   get:
- *     summary: List all F1 cars
- *     tags: [Cars]
- *     security: [ { bearerAuth: [] } ]
- *     responses:
- *       200: { description: Cars fetched }
- *
- *   post:
- *     summary: Create a new car
- *     tags: [Cars]
- *     security: [ { bearerAuth: [] } ]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/Car'
- *     responses:
- *       201: { description: Car added successfully }
- */
-app.get(`${API}/cars`, authenticateToken, asyncHandler(async (_req, res) => {
-  const { data, error } = await supabase.from('f1_cars').select('*');
-  if (error) return sendError(res, 500, 'DB_ERROR', error.message);
-  return sendSuccess(res, data, 'Cars fetched');
-}));
-app.post(`${API}/cars`, authenticateToken, asyncHandler(async (req, res) => {
-  const { data, error } = await supabase.from('f1_cars').insert([req.body]).select();
-  if (error) return sendError(res, 500, 'DB_ERROR', error.message);
-  return sendSuccess(res, data, 'Car added successfully', 201);
-}));
-
-/**
-  @swagger
- * /cars/{id}:
- *   get:
- *     summary: Get car by car_id
- *     tags: [Cars]
- *     security: [ { bearerAuth: [] } ]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200: { description: Car details fetched }
- *       404: { description: Not found }
- *
- *   put:
- *     summary: Update a car by car_id
- *     tags: [Cars]
- *     security: [ { bearerAuth: [] } ]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             $ref: '#/components/schemas/Car'
- *     responses:
- *       200: { description: Car updated }
- *       404: { description: Not found }
- *
- *   delete:
- *     summary: Delete a car by car_id
- *     tags: [Cars]
- *     security: [ { bearerAuth: [] } ]
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200: { description: Car deleted }
- */
-app.get(`${API}/cars/:id`, authenticateToken, asyncHandler(async (req, res) => {
-  const { data, error } = await supabase
-    .from('f1_cars')
-    .select('*')
-    .eq('car_id', req.params.id)
-    .single();
-  if (error) return sendError(res, 500, 'DB_ERROR', error.message);
-  if (!data) return sendError(res, 404, 'NOT_FOUND', 'Car not found');
-  return sendSuccess(res, data, 'Car details fetched');
-}));
-app.put(`${API}/cars/:id`, authenticateToken, asyncHandler(async (req, res) => {
-  const { data, error } = await supabase
-    .from('f1_cars')
-    .update(req.body)
-    .eq('car_id', req.params.id)
-    .select();
-  if (error) return sendError(res, 500, 'DB_ERROR', error.message);
-  if (!data || data.length === 0) return sendError(res, 404, 'NOT_FOUND', 'Car not found');
-  return sendSuccess(res, data, 'Car updated');
-}));
-app.delete(`${API}/cars/:id`, authenticateToken, asyncHandler(async (req, res) => {
-  const { error } = await supabase.from('f1_cars').delete().eq('car_id', req.params.id);
-  if (error) return sendError(res, 500, 'DB_ERROR', error.message);
-  return sendSuccess(res, null, 'Car deleted');
-}));
-
-// ─────────────────────────────────────────────
-// Swagger Documentation
-// ─────────────────────────────────────────────
-const swaggerOptions = {
-  definition: {
-    openapi: '3.0.0',
-    info: { title: 'F1 Cars API', version: '1.0.0', description: 'API documentation for F1 Cars backend (Node + Supabase)' },
-    servers: [{ url: `http://35.172.222.26:${API}` }],
-    components: {
-      securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' } }
-    },
-    security: [{ bearerAuth: [] }]
+const swaggerSpec = {
+  openapi: '3.0.0',
+  info: {
+    title: 'F1 Cars API',
+    version: '1.0.0',
+    description: 'API documentation for F1 Cars backend (Node + Supabase)',
   },
-  apis: ['./index.js'],
+  servers: swaggerServers,
+  components: {
+    securitySchemes: {
+      bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+    },
+    schemas: {
+      SignupBody: {
+        type: 'object',
+        required: ['email', 'password', 'name'],
+        properties: {
+          email: { type: 'string', format: 'email' },
+          password: { type: 'string' },
+          name: { type: 'string' },
+        },
+      },
+      LoginBody: {
+        type: 'object',
+        required: ['email', 'password'],
+        properties: {
+          email: { type: 'string', format: 'email' },
+          password: { type: 'string' },
+        },
+      },
+      Car: {
+        type: 'object',
+        required: ['name', 'manufacturer', 'year'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          name: { type: 'string' },
+          manufacturer: { type: 'string' },
+          top_speed: { type: 'number' },
+          horsepower: { type: 'number' },
+          driver: { type: 'string' },
+          year: { type: 'integer' },
+          image_url: { type: 'string' },
+          created_at: { type: 'string', format: 'date-time' },
+        },
+      },
+    },
+  },
+  paths: {
+    '/': { get: { tags: ['System'], summary: 'API index', responses: { '200': { description: 'OK' } } } },
+    '/auth/signup': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Signup and get JWT',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/SignupBody' } } } },
+        responses: { '200': { description: 'Signup successful' } },
+      },
+    },
+    '/auth/login': {
+      post: {
+        tags: ['Auth'],
+        summary: 'Login and get JWT',
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/LoginBody' } } } },
+        responses: { '200': { description: 'Login successful' } },
+      },
+    },
+    '/cars': {
+      get: { tags: ['Cars'], summary: 'List cars', security: [{ bearerAuth: [] }], responses: { '200': { description: 'Cars fetched' } } },
+      post: {
+        tags: ['Cars'],
+        summary: 'Add car',
+        security: [{ bearerAuth: [] }],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/Car' } } } },
+        responses: { '201': { description: 'Car created' } },
+      },
+    },
+    '/cars/{id}': {
+      get: {
+        tags: ['Cars'],
+        summary: 'Get car by ID',
+        parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: { '200': { description: 'Car fetched' } },
+      },
+      put: {
+        tags: ['Cars'],
+        summary: 'Update car',
+        parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }],
+        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/Car' } } } },
+        responses: { '200': { description: 'Car updated' } },
+      },
+      delete: {
+        tags: ['Cars'],
+        summary: 'Delete car',
+        parameters: [{ in: 'path', name: 'id', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: { '200': { description: 'Car deleted' } },
+      },
+    },
+  },
 };
-const swaggerSpec = swaggerJsdoc(swaggerOptions);
+
 app.use(`${API}/docs`, swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // ─────────────────────────────────────────────
-// Error handlers (keep LAST)
-// ─────────────────────────────────
+// Routes
+// ─────────────────────────────────────────────
+const r = express.Router();
 
-app.use((req, res) => sendError(res, 404, 'NOT_FOUND', `Route ${req.method} ${req.originalUrl} not found`));
+r.get('/', (_req, res) => ok(res, { message: 'Welcome to F1 Cars API 🚀' }));
+
+// Auth
+r.post('/auth/signup', ah(async (req, res) => {
+  const { error } = signupSchema.validate(req.body);
+  if (error) return bad(res, 400, 'VALIDATION_ERROR', error.details[0].message);
+  if (!dbAnon) return bad(res, 500, 'CONFIG', 'Anon key missing');
+
+  const { email, password, name } = req.body;
+  const { data: authData, error: signErr } = await dbAnon.auth.signUp({
+    email, 
+    password, 
+    options: { 
+      data: { full_name: name },
+      emailRedirectTo: `${SERVER_PUBLIC_URL || 'http://localhost:3000'}/auth/callback`
+    }
+  });
+  
+  if (signErr || !authData?.user) {
+    return bad(res, 400, 'SIGNUP_FAILED', signErr?.message || 'Failed to create user');
+  }
+
+  const token = jwt.sign({ id: authData.user.id, email }, JWT_SECRET, { expiresIn: '3h' });
+  ok(res, { token, user: { id: authData.user.id, email, name } }, 'Signup successful');
+}));
+
+r.post('/auth/login', ah(async (req, res) => {
+  const { error } = loginSchema.validate(req.body);
+  if (error) return bad(res, 400, 'VALIDATION_ERROR', error.details[0].message);
+
+  const { email, password } = req.body;
+  const client = dbAnon || db;
+  const { data, error: authErr } = await client.auth.signInWithPassword({ email, password });
+  if (authErr || !data?.user) return bad(res, 401, 'INVALID_CREDENTIALS', authErr?.message || 'Invalid credentials');
+
+  const token = jwt.sign({ id: data.user.id, email: data.user.email }, JWT_SECRET, { expiresIn: '3h' });
+  ok(res, { token, user: { id: data.user.id, email: data.user.email } }, 'Login successful');
+}));
+
+// Cars CRUD
+r.get('/cars', auth, ah(async (_req, res) => {
+  const { data, error } = await db.from('f1_cars').select('*').order('created_at', { ascending: false });
+  if (error) return bad(res, 500, 'DB', error.message);
+  ok(res, data, 'Cars fetched');
+}));
+
+r.post('/cars', auth, ah(async (req, res) => {
+  const { error, value } = carSchema.validate(req.body);
+  if (error) return bad(res, 400, 'VALIDATION', error.details[0].message);
+
+  const { data, error: dberr } = await db.from('f1_cars').insert([value]).select();
+  if (dberr) return bad(res, 500, 'DB', dberr.message);
+  ok(res, data?.[0], 'Car created', 201);
+}));
+
+r.get('/cars/:id', auth, ah(async (req, res) => {
+  const { data, error } = await db.from('f1_cars').select('*').eq('id', req.params.id).maybeSingle();
+  if (error) return bad(res, 500, 'DB', error.message);
+  if (!data) return bad(res, 404, 'NOT_FOUND', 'Car not found');
+  ok(res, data, 'Car fetched');
+}));
+
+r.put('/cars/:id', auth, ah(async (req, res) => {
+  const { error, value } = carSchema.validate(req.body);
+  if (error) return bad(res, 400, 'VALIDATION', error.details[0].message);
+
+  const { data, error: dberr } = await db.from('f1_cars').update(value).eq('id', req.params.id).select();
+  if (dberr) return bad(res, 500, 'DB', dberr.message);
+  ok(res, data?.[0], 'Car updated');
+}));
+
+r.delete('/cars/:id', auth, ah(async (req, res) => {
+  const { error } = await db.from('f1_cars').delete().eq('id', req.params.id);
+  if (error) return bad(res, 500, 'DB', error.message);
+  ok(res, null, 'Car deleted');
+}));
+
+app.use(API, r);
+
+// Error handling
+app.use((req, res) => bad(res, 404, 'NOT_FOUND', `Route ${req.method} ${req.originalUrl} not found`));
 app.use((err, _req, res, _next) => {
   console.error('Unhandled error:', err);
-  return sendError(res, 500, 'SERVER_ERROR', 'Something went wrong',
-    process.env.NODE_ENV === 'development' ? err.stack : undefined);
+  bad(res, 500, 'SERVER_ERROR', 'Internal server error', NODE_ENV === 'development' ? err.stack : undefined);
 });
 
 // ─────────────────────────────────────────────
-// Start server
+// Server Start
 // ─────────────────────────────────────────────
-app.listen(PORT, () => console.log(`✅ F1 API running on http://35.172.222.26:${API}`))
-
-
-//Right now your code only inserts into public.profiles during signup if a session exists (i.e., email confirmation is OFF). If email confirmation is ON, there’s no session, so your code skips the insert—hence you see users in auth.users but not in public.profiles.
-
-//When a user signs up, Supabase creates a record in auth.users.
-
-// Because email verification is ON, Supabase does not create a session → your code skips profile insertion.
-// So:
-// User exists only in auth.users
-// Their profile row in public.profiles is created only if you explicitly insert it later (for example, via an admin panel or a post-verification process).
+const displayBase = SERVER_PUBLIC_URL ? `${SERVER_PUBLIC_URL}${API}` : `http://localhost:${PORT}${API}`;
+app.listen(PORT, () => {
+  console.log(`✅ Env: ${NODE_ENV}`);
+  console.log(`✅ API base: ${displayBase}`);
+  console.log(`📘 Swagger: ${(SERVER_PUBLIC_URL || `http://localhost:${PORT}`)}${API}/docs`);
+});
