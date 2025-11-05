@@ -21,7 +21,8 @@ module.exports = {
         NODE_ENV: 'production',
         PORT: 3000,
         API: '/api',
-        SERVER_PUBLIC_URL: 'https://your-production-domain.com', // 🔁 change this
+        SERVER_PUBLIC_URL: 'http://54.227.121.56/', // 🔁 change this
+        ALLOWED_ORIGINS: '',
         SUPABASE_URL: process.env.SUPABASE_URL,
         SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
         SUPABASE_KEY: process.env.SUPABASE_KEY,
