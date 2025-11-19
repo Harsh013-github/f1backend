@@ -21,7 +21,6 @@ module.exports = {
         NODE_ENV: 'production',
         PORT: 3000,
         API: '/api',
-        SERVER_PUBLIC_URL: 'http://localhost:3000', //
         ALLOWED_ORIGINS: '',
         SUPABASE_URL: process.env.SUPABASE_URL,
         SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
